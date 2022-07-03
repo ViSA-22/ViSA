@@ -39,10 +39,14 @@ from facenet_utils import load_dataset, normalize_vectors, predict_using_classif
 
 import ctypes
 import pyds
+import os
+import datetime
+import time
+
 
 fps_stream=None
 face_counter= []
-PGIE_CLASS_ID_VEHICLE = 0
+# PGIE_CLASS_ID_VEHICLE = 0
 PGIE_CLASS_ID_PERSON = 2
 
 SGIE_CLASS_ID_LP = 1
@@ -55,13 +59,23 @@ SECONDARY_DETECTOR_UID = 2
 DATASET_PATH = 'embeddings/faces-embeddings.npz'
 
 faces_embeddings, labels = load_dataset(DATASET_PATH)
+face_embedding_to_save = None
 
+name = ['Young','Deok','Chan','Kwon','Chu']
+
+glasses_dict = {
+  "Young": "Yes",
+  "Deok": "No",
+  "Chan": "Yes",
+  "Kwon": "No",
+  "Chu": "Yes"
+}
 
 def osd_sink_pad_buffer_probe(pad,info,u_data):
     global fps_stream, face_counter
     frame_number=0
     #Intiallizing object counter with 0.
-    vehicle_count = 0
+    # vehicle_count = 0
     person_count = 0
     face_count = 0
     lp_count = 0
@@ -98,8 +112,8 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             except StopIteration:
                 break
             if obj_meta.unique_component_id == PRIMARY_DETECTOR_UID:
-                if obj_meta.class_id == PGIE_CLASS_ID_VEHICLE:
-                    vehicle_count += 1
+                # if obj_meta.class_id == PGIE_CLASS_ID_VEHICLE:
+                #     vehicle_count += 1
                 if obj_meta.class_id == PGIE_CLASS_ID_PERSON:
                     person_count += 1
 
@@ -125,7 +139,7 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
         # memory will not be claimed by the garbage collector.
         # Reading the display_text field here will return the C address of the
         # allocated string. Use pyds.get_string() to get the string content.
-        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={}  Person_count={} Face Count={}".format(frame_number, num_rects, person_count, face_count)
+        py_nvosd_text_params.display_text = "Frame Number={} Number of Face={}".format(frame_number, num_rects)
         face_counter.append(face_count)
 
         # Now set the offsets where the string should appear
@@ -134,7 +148,7 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
 
         # Font , font-color and font-size
         py_nvosd_text_params.font_params.font_name = "Serif"
-        py_nvosd_text_params.font_params.font_size = 10
+        py_nvosd_text_params.font_params.font_size = 20
         # set(red, green, blue, alpha); set to White
         py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
 
@@ -151,6 +165,16 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             break
 			
     return Gst.PadProbeReturn.OK	
+
+def make_embedding(face_to_predict_embedding):
+    global face_embedding_to_save
+
+    if face_embedding_to_save is None:
+        face_embedding_to_save = face_to_predict_embedding
+    else:
+        face_embedding_to_save = np.vstack((face_embedding_to_save, face_to_predict_embedding))
+        print('shape of face_embedding_to_save: ', face_embedding_to_save.shape)
+    
 
 def sgie_sink_pad_buffer_probe(pad,info,u_data):
     
@@ -217,11 +241,27 @@ def sgie_sink_pad_buffer_probe(pad,info,u_data):
                 ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
                 v = np.ctypeslib.as_array(ptr, shape=(128,))
                 
-                # Pridict face neme
+                # Pridict face name
                 yhat = v.reshape((1,-1))
                 face_to_predict_embedding = normalize_vectors(yhat)
+                
+                if trainable:
+                    make_embedding(face_to_predict_embedding)
+                        
+                # print('type of face_to_predict_embedding: ', type(face_to_predict_embedding))
+                # print('shape of face_to_predict_embedding: ', face_to_predict_embedding.shape)
                 result = predict_using_classifier(faces_embeddings, labels, face_to_predict_embedding)
-                result =  (str(result).title())
+                result = str(result).title()
+                result_tuple = result.split(',')
+                
+                result_name = result_tuple[0].split("'")[1]
+
+                ct = datetime.datetime.now()
+                command_str = "curl -XPUT -u \'admin:Admin123$\' \'https://search-visa-visa-cmn6kne72ob4eumf4k6xw52rgq.us-east-2.es.amazonaws.com/faces/_doc/" + str(ct)[-6::] + "\' -d '{\"name\": \"" + result_name + "\", \"time_stamp\": \"" + str(ct)[0:19] + "\", \"date\": \"" + str(ct)[0:10] + "\", \"gender\": \"male\", \"glasses\": \"" + glasses_dict[result_name]+ "\"}\' -H \'Content-Type: application/json\'"
+                
+
+                os.system(command_str)
+                print('')
                 print('Predicted name: %s' % result)
                 
                 # Generate classifer metadata and attach to obj_meta
@@ -284,7 +324,9 @@ def main(args):
     # Source element for reading from the file
     print("Creating Source \n ")
     # source = Gst.ElementFactory.make("filesrc", "file-source")
+    
     source = Gst.ElementFactory.make("nvarguscamerasrc", "csi-cam-source")
+    
     if not source:
         sys.stderr.write(" Unable to create Source \n")
 
@@ -404,12 +446,14 @@ def main(args):
     # caps_vidconvsrc.set_property('caps', Gst.Caps.from_string("video/x-raw(memory:NVMM)"))
     # source.set_property('device', stream_path)
     source.set_property('bufapi-version', True)
-    caps_nvvidconv_src.set_property('caps', Gst.Caps.from_string('video/x-raw(memory:NVMM), framerate=15/1, width=1920, height=1080'))
 
-    streammux.set_property('width', 1920)
-    streammux.set_property('height', 1080)
+    caps_nvvidconv_src.set_property('caps', Gst.Caps.from_string('video/x-raw(memory:NVMM), framerate=15/1, width=854, height=480'))
+
+    streammux.set_property('width', 854)
+    streammux.set_property('height', 480)
     streammux.set_property('batch-size', 1)
     streammux.set_property('batched-push-timeout', 4000000)
+    
     face_detector.set_property('config-file-path', "detector_config.txt")
     face_classifier.set_property('config-file-path', "classifier_config.txt")
 
@@ -541,6 +585,16 @@ def main(args):
         pass
     # cleanup
     pipeline.set_state(Gst.State.NULL)
+    
+    if trainable:
+        from numpy import savez_compressed
+        from datetime import datetime
+        now = datetime.now()
+        date_time = now.strftime("%m%d-%H%M%S")
+        array_size = face_embedding_to_save.shape[0]
+        label_array = np.full(array_size, label)
+        savez_compressed(f'./embeddings/trainable/{label}-{date_time}.npz', face_embedding_to_save, label_array)
+        print('shape of face_embedding_to_save: ', face_embedding_to_save.shape)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='RTSP Output Sample Application Help ')
@@ -550,17 +604,26 @@ def parse_args():
                   help="RTSP Streaming Codec H264/H265 , default=H264", choices=['H264','H265'])
     parser.add_argument("-b", "--bitrate", default=4000000,
                   help="Set the encoding bitrate ", type=int)
+    parser.add_argument("-t", "--trainable", default=0,
+                  help="Make face embedding vectors to train model,", type=int)
+    parser.add_argument("-l", "--label", default="Young",
+                  help="Name for label, choose one of the name [Young/Deok/Chan/Kwon/Chu] , default=Young", 
+                  choices=['Young','Deok','Chan','Kwon','Chu'])
     # Check input arguments
     # if len(sys.argv)==1:
     #     parser.print_help(sys.stderr)
     #     sys.exit(1)
     args = parser.parse_args()
+    global stream_path
     global codec
     global bitrate
-    global stream_path
+    global trainable
+    global label
+    stream_path = args.input
     codec = args.codec
     bitrate = args.bitrate
-    stream_path = args.input
+    trainable = args.trainable
+    label = args.label
     return 0
     
 if __name__ == '__main__':
